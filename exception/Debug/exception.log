@@ -1,0 +1,5 @@
+﻿  exception.cpp
+exception.obj : error LNK2019: 无法解析的外部符号 _GetFileVersionInfoSizeW@8，函数 "void __cdecl print_windows_version(class std::basic_ostream<char,struct std::char_traits<char> > &)" (?print_windows_version@@YAXAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@@Z) 中引用了该符号
+exception.obj : error LNK2019: 无法解析的外部符号 _GetFileVersionInfoW@16，函数 "void __cdecl print_windows_version(class std::basic_ostream<char,struct std::char_traits<char> > &)" (?print_windows_version@@YAXAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@@Z) 中引用了该符号
+exception.obj : error LNK2019: 无法解析的外部符号 _VerQueryValueW@16，函数 "void __cdecl print_windows_version(class std::basic_ostream<char,struct std::char_traits<char> > &)" (?print_windows_version@@YAXAAV?$basic_ostream@DU?$char_traits@D@std@@@std@@@Z) 中引用了该符号
+E:\Exception\Exception\Debug\exception.exe : fatal error LNK1120: 3 个无法解析的外部命令
