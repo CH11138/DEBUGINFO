@@ -102,6 +102,49 @@ DWORD seh_filer(int code)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+
+//获取所有的线程ID 未测试
+int GetProcessThreadList(DWORD th32ProcessID) //进程的ID
+{
+  HANDLE        hThreadSnap;
+  THREADENTRY32 th32;
+  hThreadSnap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, th32ProcessID);
+  if (hThreadSnap == INVALID_HANDLE_VALUE)
+  {
+    return 1;
+  }
+  th32.dwSize = sizeof(THREADENTRY32);
+  if (!Thread32First(hThreadSnap, &th32))
+  {
+    CloseHandle(hThreadSnap);
+    return 1;
+  }
+  do
+  {
+    if (th32.th32OwnerProcessID == th32ProcessID)
+    {
+      printf("ThreadID: %ld\n", th32.th32ThreadID); //显示找到的线程的ID
+    }
+  } while (Thread32Next(hThreadSnap, &th32));
+  CloseHandle(hThreadSnap);
+  return 0;
+}
+
+/////如果进程没有运行在调试器环境中，函数返回0；如果调试附加了进程，函数返回一个非零值。
+BOOL CheckDebug()
+{
+  return IsDebuggerPresent();
+}
+
+////CheckRemoteDebuggerPresent不仅可以查询系统其他进程是否被调试，而且还可以通过传递自己的进程句柄来判断自己是否被调试。
+BOOL CheckProcessDebug()
+{
+  BOOL ret;
+  CheckRemoteDebuggerPresent(GetCurrentProcess(), &ret);
+  return ret;
+}
+
+
 LONG WINAPI ExpFilter(EXCEPTION_POINTERS* pExp, DWORD dwExpCode)
 {
     seh_filer(dwExpCode);
@@ -136,6 +179,85 @@ LONG WINAPI ExpFilter(EXCEPTION_POINTERS* pExp, DWORD dwExpCode)
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
+inline BOOL IsDataSectionNeeded(const WCHAR* pModuleName)
+{
+  if (pModuleName == 0)
+    return FALSE;
+  WCHAR szFileName[_MAX_FNAME] = L"";
+  _wsplitpath(pModuleName, NULL, NULL, szFileName, NULL);
+  if (wcsicmp(szFileName, L"ntdll") == 0)
+    return TRUE;
+  return FALSE;
+}
+
+inline BOOL CALLBACK MiniDumpCallback(PVOID                          pParam,
+                                      const PMINIDUMP_CALLBACK_INPUT pInput,
+                                      PMINIDUMP_CALLBACK_OUTPUT      pOutput)
+{
+  if (pInput == 0 || pOutput == 0)
+    return FALSE;
+  switch (pInput->CallbackType)
+  {
+    case ModuleCallback:
+    {
+      if (pOutput->ModuleWriteFlags & ModuleWriteDataSeg)
+        if (!IsDataSectionNeeded(pInput->Module.FullPath))
+          pOutput->ModuleWriteFlags &= (~ModuleWriteDataSeg);
+    }
+    break;
+    case IncludeModuleCallback:
+    case IncludeThreadCallback:
+    case ThreadCallback:
+    case ThreadExCallback:
+      return TRUE;
+    default:
+      break;
+  }
+  return FALSE;
+}
+
+//创建Dump文件
+inline void CreateMiniDump(EXCEPTION_POINTERS* pep, LPCTSTR strFileName)
+{
+  HANDLE hFile =
+      CreateFile(strFileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+  if ((hFile != NULL) && (hFile != INVALID_HANDLE_VALUE))
+  {
+    MINIDUMP_EXCEPTION_INFORMATION mdei;
+    mdei.ThreadId = GetCurrentThreadId();
+    mdei.ExceptionPointers = pep; //设置异常信息指针EXCEPTION_POINTERS
+    mdei.ClientPointers = FALSE;
+
+    //设置回调函数
+    MINIDUMP_CALLBACK_INFORMATION mci;
+    mci.CallbackRoutine = (MINIDUMP_CALLBACK_ROUTINE)MiniDumpCallback;
+    mci.CallbackParam = 0;
+
+    MINIDUMP_TYPE mdt = (MINIDUMP_TYPE)0x0000ffff;
+    MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile, MiniDumpNormal, &mdei,
+                      NULL, NULL);
+
+    CloseHandle(hFile);
+  }
+}
+
+// For more info about "PreventSetUnhandledExceptionFilter" see:
+// "SetUnhandledExceptionFilter" and VC8
+// http://blog.kalmbachnet.de/?postid=75
+// and
+// Unhandled exceptions in VC8 and above?for x86 and x64
+// http://blog.kalmbach-software.de/2008/04/02/unhandled-exceptions-in-vc8-and-above-for-x86-and-x64/
+// Even better: http://blog.kalmbach-software.de/2013/05/23/improvedpreventsetunhandledexceptionfilter/
+
+/*CRT 通过调用 SetUnhandledExceptionFilter 并传递参数 NULL 来清除用户注册的 Unhandled Exception Filter。
+如果期望用户注册的 Unhandled Exception Filter 总是被调用那么应该避免 CRT 中相关的清理代码。做法之一就是修改 CRT 代码并且编译为静态库（微软的 VC++ Libraries 开发 Lead Martyn Lovell 
+在 https://connect.microsoft.com/feedback/ViewFeedback.aspx?FeedbackID=101337&SiteID=210 谈到过有关的问题);
+这里并不建议使用此做法。另外一种做法则是改变 SetUnhandledExceptionFilter 的行为，
+使得 CRT 对 SetUnhandledExceptionFilter 的调用不起任何作用（更加详细的论述可以参考《Windows 核心编程》相关章节）
+*/
+
+// 此函数一旦成功调用，之后对 SetUnhandledExceptionFilter 的调用将无效
 static BOOL PreventSetUnhandledExceptionFilter()
 {
     HMODULE hKernel32 = LoadLibrary(_T("kernel32.dll"));
@@ -197,6 +319,9 @@ static LONG __stdcall CrashHandlerExceptionFilter(EXCEPTION_POINTERS* pExPtrs)
         _T("   Please report!"),
         pExPtrs->ExceptionRecord->ExceptionCode, pExPtrs->ExceptionRecord->ExceptionFlags,
         pExPtrs->ExceptionRecord->ExceptionAddress);
+
+    CreateMiniDump(pExPtrs, s_szExceptionLogFileName); 
+
     FatalAppExit(-1, lString);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -206,8 +331,14 @@ static void InitUnhandledExceptionFilter()
     TCHAR szModName[_MAX_PATH];
     if (GetModuleFileName(NULL, szModName, sizeof(szModName) / sizeof(TCHAR)) != 0)
     {
+      TCHAR* pFind = _tcsrchr(szModName, '\\');
+      if (pFind)
+        *(pFind + 1) = 0;
+      std::wcout << szModName << std::endl;
         _tcscpy_s(s_szExceptionLogFileName, szModName);
-        _tcscat_s(s_szExceptionLogFileName, _T(".exp.log"));
+      _tcscat_s(s_szExceptionLogFileName, sizeof(s_szExceptionLogFileName),
+                _T("CreateMiniDump.dmp"));
+        std::wcout << s_szExceptionLogFileName << std::endl;
     }
     if (s_bUnhandledExeptionFilterSet == FALSE)
     {
